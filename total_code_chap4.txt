@@ -1,0 +1,1487 @@
+#### Total code for Chapter 4: differential gene expression in two species of bats infected with white-nose, in the last quartile of hibernation and one month post hibernation
+#creating directories and downloading the data
+cd ~/Datafiles/Bats
+mkdir Healing_study
+
+cd Healing_study
+#download the data, which is put in a created Trimmed directory
+wget -r --cut-dirs=2 -np -nH -R "index.html*" https://cgr.liv.ac.uk/illum/LIMS29999_f7aed22b909f8209/Trimmed/
+
+#1. qc-ing the data
+#set up shell variable - #SET UP ON GAUSS07
+workdir=$HOME/Datafiles/Bats/Healing_study
+
+#change directory
+cd $workdir/Trimmed
+#make file w fastq names
+ls */*.fastq.gz > fastq.names
+
+#activate the environment that allows fastqc
+conda activate multiqc
+
+#set up fastqc for all - this is less complicated than my previous chapter as you dont have to merge any files, dumps output into their correct directories
+while read p; do
+	echo $p "started";
+	fastqc -t 12 ${p};
+	echo $p "finished"
+done < fastq.names
+
+#deactivate the conda environment as this does not allow multiqc
+conda deactivate 
+
+#move into the main directory
+cd $workdir
+#make directory for multiqc data
+mkdir multiqc
+mkdir multiqc/pre_trimming
+mkdir multiqc/post_trimming
+mkdir multiqc/pre_trimming/R0
+mkdir multiqc/pre_trimming/R1
+mkdir multiqc/pre_trimming/R2
+mkdir multiqc/pre_trimming/R0/data
+mkdir multiqc/pre_trimming/R1/data
+mkdir multiqc/pre_trimming/R2/data
+
+####
+#move the data into various folders for the multiqc to read
+cd $workdir/Trimmed
+find . -name '*R0_001_fastqc.zip' -type f | xargs mv -t ../multiqc/pre_trimming/R0/data/.
+find . -name '*R1_001_fastqc.zip' -type f | xargs mv -t ../multiqc/pre_trimming/R1/data/.
+find . -name '*R2_001_fastqc.zip' -type f | xargs mv -t ../multiqc/pre_trimming/R2/data/.
+cd ..
+
+
+#run multiqc #multiqc will not run on debian 11, started in watt26
+multiqc multiqc/pre_trimming/R0/data -o multiqc/pre_trimming/R0
+multiqc multiqc/pre_trimming/R1/data  -o multiqc/pre_trimming/R1
+multiqc multiqc/pre_trimming/R2/data  -o multiqc/pre_trimming/R2
+
+#looks good so dont need to trim!
+
+
+##5b STAR redo
+
+#have to build a star reference genome index using the genome fasta and the annotation
+#then can map the fastq to the indexed genome
+workdir=$HOME/Datafiles/Bats/Healing_study
+mkdir $workdir/STAR_combined
+mkdir $workdir/STAR_combined/reference
+
+#concatenate the two reference genomes to make the reference transcriptome
+cat ~/Datafiles/Bats/myomyo/GCF_014108235.1_mMyoMyo1.p_genomic.fna ~/Datafiles/Fungi/psedes/GCF_001641265.1_ASM164126v1_genomic.fna > $workdir/STAR_combined/reference_genome.fna
+cat ~/Datafiles/Bats/myomyo/GCF_014108235.1_mMyoMyo1.p_genomic.gtf ~/Datafiles/Fungi/psedes/GCF_001641265.1.genomic.gtf > $workdir/STAR_combined/reference_genome.gtf
+
+STAR --runMode genomeGenerate --runThreadN 192 --genomeDir $workdir/STAR_combined/reference --genomeFastaFiles $workdir/STAR_combined/reference_genome.fna --sjdbGTFfile $workdir/STAR_combined/reference_genome.gtf  --sjdbOverhang 149 --genomeSAindexNbases 11
+
+while read samp; do
+	echo $samp;
+	R1=$workdir/Trimmed/Sample_${samp}/${samp}_*_R1_*.fastq.gz;
+	R2=$workdir/Trimmed/Sample_${samp}/${samp}_*_R2_*.fastq.gz;
+	STAR --runThreadN 192 --readFilesCommand zcat --readFilesIn $R1 $R2 --genomeDir $workdir/STAR_combined/reference --outSAMtype BAM SortedByCoordinate --outFileNamePrefix ${workdir}/STAR_combined/${samp} --outSAMunmapped Within;
+	echo $samp "finished";
+done < $workdir/Trimmed/samp_names
+
+echo done
+
+
+
+
+
+#2. mapping the sequence data
+
+#make a directory for the counts
+mkdir $workdir/STAR_combined/counts 
+
+while read samp; do
+	echo $samp;
+	featureCounts -T 64 -t exon -g gene_id -a $workdir/STAR_combined/reference_genome.gtf -o $workdir/STAR_combined/counts/${samp}_counts.txt $workdir/STAR_combined/${samp}Aligned.sortedByCoord.out.bam;
+	echo $samp "finished";
+done < $workdir/Trimmed/samp_names
+
+
+
+#get out the count column from each file, then add the samp name for the header
+while read samp; do
+	sed '1d' $workdir/STAR_combined/counts/${samp}_counts.txt | cut -f7 | sed 's#/pub59/florawf/Datafiles/Bats/Healing_study/STAR_combined/##' | sed 's#Aligned.sortedByCoord.out.bam##' > $workdir/STAR_combined/counts/${samp}_counts_col.txt;
+done < $workdir/Trimmed/samp_names
+
+
+#make a features file for the eventual pasting
+cut -f1,2,3,4,5,6 $workdir/STAR_combined/counts/10-61272EN_counts.txt | sed '1d' > $workdir/STAR_combined/counts/features.tsv
+
+
+#paste all the columns together, ordering the features file first
+paste $workdir/STAR_combined/counts/features.tsv $workdir/STAR_combined/counts/*counts_col.txt > $workdir/STAR_combined/counts/total_counts.tsv
+
+
+
+###
+#get the summary stats out of str
+mkdir $workdir/STAR_combined/star_summary
+cd $workdir/STAR_combined
+
+touch $workdir/STAR_combined/star_summary/no_uniquely_mapped_reads
+while read samp; do
+	grep 'Uniquely mapped reads number' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/no_uniquely_mapped_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/no_input_reads
+while read samp; do
+	grep 'Number of input reads' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/no_input_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/percent_uniq_mapped_reads
+while read samp; do
+	grep 'Uniquely mapped reads %' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/percent_uniq_mapped_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/multi_mapped_reads
+while read samp; do
+	grep 'Number of reads mapped to multiple loci' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/multi_mapped_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/percent_multi_mapped_reads
+while read samp; do
+	grep '% of reads mapped to multiple loci' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/percent_multi_mapped_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/no_too_many_loci
+while read samp; do
+	grep 'Number of reads mapped to too many loci' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/no_too_many_loci
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/percent_too_many_loci
+while read samp; do
+	grep '% of reads mapped to too many loci' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/percent_too_many_loci
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/unmapped_mismatches
+while read samp; do
+	grep 'Number of reads unmapped: too many mismatches' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/unmapped_mismatches
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/unmapped_too_short
+while read samp; do
+	grep 'Number of reads unmapped: too short' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/unmapped_too_short
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/percent_unmapped_too_short
+while read samp; do
+	grep '% of reads unmapped: too short' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/percent_unmapped_too_short
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/unmapped_other
+while read samp; do
+	grep 'Number of reads unmapped: other' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/unmapped_other
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/percent_unmapped_other
+while read samp; do
+	grep '% of reads unmapped: other' ${samp}Log.final.out | xargs | cut -d'|' -f2 >> $workdir/STAR_combined/star_summary/percent_unmapped_other
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/star_summary/samp_names
+while read samp; do
+	echo ${samp} >> $workdir/STAR_combined/star_summary/samp_names
+done < $workdir/Trimmed/samp_names
+
+
+###merge all of these dfs together
+cd $workdir/STAR_combined/star_summary
+
+python
+import pandas as pd
+
+samp_names = pd.read_csv("samp_names", header=None)
+samp_names = samp_names.set_axis(['samp'], axis=1)
+
+no_input_reads = pd.read_csv("no_input_reads", header=None)
+no_input_reads = no_input_reads.set_axis(['no_input_reads'], axis=1)
+
+no_uniquely_mapped_reads = pd.read_csv("no_uniquely_mapped_reads", header=None)
+no_uniquely_mapped_reads = no_uniquely_mapped_reads.set_axis(['no_uniquely_mapped_reads'], axis=1)
+
+percent_uniq_mapped_reads = pd.read_csv("percent_uniq_mapped_reads", header=None)
+percent_uniq_mapped_reads = percent_uniq_mapped_reads.set_axis(['percent_uniq_mapped_reads'], axis=1)
+
+multi_mapped_reads = pd.read_csv("multi_mapped_reads", header=None)
+multi_mapped_reads = multi_mapped_reads.set_axis(['multi_mapped_reads'], axis=1)
+
+percent_multi_mapped_reads = pd.read_csv("percent_multi_mapped_reads", header=None)
+percent_multi_mapped_reads = percent_multi_mapped_reads.set_axis(['percent_multi_mapped_reads'], axis=1)
+
+no_too_many_loci = pd.read_csv("no_too_many_loci", header=None)
+no_too_many_loci = no_too_many_loci.set_axis(['no_too_many_loci'], axis=1)
+
+percent_too_many_loci = pd.read_csv("percent_too_many_loci", header=None)
+percent_too_many_loci = percent_too_many_loci.set_axis(['percent_too_many_loci'], axis=1)
+
+unmapped_mismatches = pd.read_csv("unmapped_mismatches", header=None)
+unmapped_mismatches = unmapped_mismatches.set_axis(['unmapped_mismatches'], axis=1)
+
+unmapped_too_short = pd.read_csv("unmapped_too_short", header=None)
+unmapped_too_short = unmapped_too_short.set_axis(['unmapped_too_short'], axis=1)
+
+percent_unmapped_too_short = pd.read_csv("percent_unmapped_too_short", header=None)
+percent_unmapped_too_short = percent_unmapped_too_short.set_axis(['percent_unmapped_too_short'], axis=1)
+
+unmapped_other = pd.read_csv("unmapped_other", header=None)
+unmapped_other = unmapped_other.set_axis(['unmapped_other'], axis=1)
+
+percent_unmapped_other = pd.read_csv("percent_unmapped_other", header=None)
+percent_unmapped_other = percent_unmapped_other.set_axis(['percent_unmapped_other'], axis=1)
+
+big_df = pd.concat([samp_names, no_input_reads, no_uniquely_mapped_reads, percent_uniq_mapped_reads, multi_mapped_reads, percent_multi_mapped_reads, no_too_many_loci, percent_too_many_loci, unmapped_mismatches, unmapped_too_short, percent_unmapped_too_short, unmapped_other, percent_unmapped_other], axis=1)
+
+big_df.to_csv("star_summary.csv", header=True, index=True)
+
+quit()
+
+###
+#get the summary stats out of FC
+mkdir $workdir/STAR_combined/FC_summary
+cd $workdir/STAR_combined/counts
+
+touch $workdir/STAR_combined/FC_summary/assigned_reads
+while read samp; do
+	grep 'Assigned'  $workdir/STAR_combined/counts/${samp}_counts.txt.summary | cut -f2 >> $workdir/STAR_combined/FC_summary/assigned_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/FC_summary/unassigned_unmapped_reads
+while read samp; do
+	grep 'Unassigned_Unmapped'  $workdir/STAR_combined/counts/${samp}_counts.txt.summary | cut -f2 >> $workdir/STAR_combined/FC_summary/unassigned_unmapped_reads
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/FC_summary/unassigned_multimapping
+while read samp; do
+	grep 'Unassigned_MultiMapping'  $workdir/STAR_combined/counts/${samp}_counts.txt.summary | cut -f2 >> $workdir/STAR_combined/FC_summary/unassigned_multimapping
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/FC_summary/unassigned_nofeatures
+while read samp; do
+	grep 'Unassigned_NoFeatures'  $workdir/STAR_combined/counts/${samp}_counts.txt.summary | cut -f2 >> $workdir/STAR_combined/FC_summary/unassigned_nofeatures
+done < $workdir/Trimmed/samp_names
+
+touch $workdir/STAR_combined/FC_summary/unassigned_ambig
+while read samp; do
+	grep 'Unassigned_Ambiguity'  $workdir/STAR_combined/counts/${samp}_counts.txt.summary | cut -f2 >> $workdir/STAR_combined/FC_summary/unassigned_ambig
+done < $workdir/Trimmed/samp_names
+
+cd $workdir/STAR_combined/FC_summary
+
+python
+import pandas as pd
+
+samp_names = pd.read_csv("../star_summary/samp_names", header=None)
+samp_names = samp_names.set_axis(['samp'], axis=1)
+
+assigned_reads = pd.read_csv("assigned_reads", header=None)
+assigned_reads = assigned_reads.set_axis(['assigned_reads'], axis=1)
+
+unassigned_unmapped_reads = pd.read_csv("unassigned_unmapped_reads", header=None)
+unassigned_unmapped_reads = unassigned_unmapped_reads.set_axis(['unassigned_unmapped_reads'], axis=1)
+
+unassigned_multimapping = pd.read_csv("unassigned_multimapping", header=None)
+unassigned_multimapping = unassigned_multimapping.set_axis(['unassigned_multimapping'], axis=1)
+
+unassigned_nofeatures = pd.read_csv("unassigned_nofeatures", header=None)
+unassigned_nofeatures = unassigned_nofeatures.set_axis(['unassigned_nofeatures'], axis=1)
+
+unassigned_ambig = pd.read_csv("unassigned_ambig", header=None)
+unassigned_ambig = unassigned_ambig.set_axis(['unassigned_ambig'], axis=1)
+
+big_df = pd.concat([samp_names, assigned_reads, unassigned_unmapped_reads, unassigned_multimapping, unassigned_nofeatures, unassigned_ambig], axis=1)
+
+big_df.to_csv("fc_summary.csv", header=True, index=True)
+
+star_df = pd.read_csv("../star_summary/star_summary.csv", index_col=0, header='infer')
+
+huge_df = pd.merge(star_df, big_df, left_on='samp', right_on='samp')
+huge_df.to_csv("../star_fc_summaries.csv", index=False, header=True)
+
+quit()
+
+
+
+
+
+#3. Getting out the fungal loads with edgeR
+#ported the count data over to my machine, and used Rstudio directly
+#load libraries
+library(edgeR)
+library(tidyverse)
+library(dplyr)
+
+#set working directory
+setwd("~/Documents/coding_files/Chap4/raw_counts")
+
+#read in the gene info
+genes <- read.csv("gene_info.csv", header=TRUE)
+
+#read in the species info
+info = read.csv("sample_info.csv", header=TRUE)
+
+#add in the big dataframe of counts 
+df = read.csv("star/star_total_counts.tsv", sep="\t", header=TRUE)
+
+#make the dataframe so it removes the extra info
+#make the geneid the rownames
+rownames(df) <- df[,1]
+#get rid of all of the non count columns
+counts <- df[,-c(1:6)]
+
+#looking at only the early timepoints
+info <- info[info$Timepoint == "early",]
+
+#get the grouping column as a list 
+myomyo <- info[info$Species == "myomyo",] #get only the info on myomyo
+myomyo_id <- myomyo[,1] #get only the ids as a list
+myoluc <- info[info$Species == "myoluc",] #get only the info on myoluc
+myoluc_id <- myoluc[,1] #get only the ids as a list
+
+#get only one species in the big count df
+myo_counts <- counts[, myomyo_id] #filter the count data for only myomyo columns
+luc_counts <- counts[, myoluc_id] #filter the count data for only myoluc columns
+
+#convert the count data into matrices
+myo_counts_mat <- as.matrix(myo_counts) #this already has the geneids as the row names
+luc_counts_mat <- as.matrix(luc_counts) #this already has the geneids as the row names
+
+#create a dge object 
+myo_dge <- DGEList(counts=myo_counts_mat,group=as.factor(myomyo$Treatment)) #create a DGElist object, adding in a list with the treatment group
+luc_dge <- DGEList(counts=luc_counts_mat,group=as.factor(myoluc$Treatment)) #create a DGElist object, adding in a list with the treatment group
+
+#obtain transcripts per million
+myo_CPM <- cpm(myo_dge)
+luc_CPM <- cpm(luc_dge)
+
+#get out the fungal data from the cpm
+fungi_genes <- genes[genes$Species == "psedes",] #get only the info on fungi
+fungi_id <- fungi_genes[,1] #get only the ids as a list
+#get the fungal data for each
+myo_fungi_CPM <- myo_CPM[fungi_id, ]
+luc_fungi_CPM <- luc_CPM[fungi_id, ]
+
+#get the column sums for each df
+myo_total_fungi_CPM <- colSums(myo_fungi_CPM)
+luc_total_fungi_CPM <- colSums(luc_fungi_CPM)
+
+#add in the fungal data to the info
+myomyo$fungi_cpm <- myo_total_fungi_CPM
+myoluc$fungi_cpm <- luc_total_fungi_CPM
+
+#order the dataframes by the individual
+myomyo <- myomyo[order(myomyo$Individual, decreasing = TRUE), ]
+myoluc <- myoluc[order(myoluc$Individual, decreasing = TRUE), ]
+
+#finding the standard deviation
+early_myo_neg <- myomyo[myomyo$Treatment == "early_neg", ]
+early_luc_neg <- myoluc[myoluc$Treatment == "early_neg", ]
+
+#getting the standard deviation and the mean
+myo_sd <- sd(early_myo_neg$fungi_cpm)
+myo_mean <- mean(early_myo_neg$fungi_cpm)
+luc_sd <- sd(early_luc_neg$fungi_cpm)
+luc_mean <- mean(early_luc_neg$fungi_cpm)
+
+#getting the min and max sd ranges
+myo_neg_max <- myo_mean + 3*myo_sd
+luc_neg_max <- luc_mean + 3*luc_sd
+myo_neg_min <- myo_mean - 3*myo_sd
+luc_neg_min <- luc_mean - 3*luc_sd
+
+#add in the lines to the plots
+ggplot(myomyo, aes(x=Treatment, y = fungi_cpm)) + geom_boxplot() + geom_hline(yintercept = myo_neg_max) + geom_hline(yintercept = myo_neg_min) + geom_point() + geom_line(aes(group=Individual)) + ylab("Fungal counts per million") + ggtitle("myotis myotis")
+
+ggplot(myoluc, aes(x=Treatment, y = fungi_cpm)) + geom_boxplot(aes(x=Treatment, y = fungi_cpm)) + geom_hline(yintercept = luc_neg_max) + geom_hline(yintercept = luc_neg_min) + 
+  geom_point(aes(colour=Population)) + 
+  geom_line(aes(group=Individual, colour=Population)) + ylab("Fungal counts per million") + ggtitle("myotis lucifugus")
+
+t.test(fungi_cpm ~ Treatment, data=myomyo, paired = TRUE) 
+t.test(fungi_cpm ~ Treatment, data=myoluc, paired = TRUE) 
+
+ggplot(myomyo, aes(fungi_cpm)) + geom_histogram()
+shapiro.test(myomyo$fungi_cpm)
+ggplot(myomyo, aes(log(fungi_cpm))) + geom_histogram()
+shapiro.test(log(myomyo$fungi_cpm))
+t.test(log(fungi_cpm) ~ Treatment, data=myomyo, paired=TRUE)
+
+ggplot(myoluc, aes(fungi_cpm)) + geom_histogram()
+shapiro.test(myoluc$fungi_cpm)
+ggplot(myoluc, aes(log(fungi_cpm))) + geom_histogram()
+shapiro.test(log(myoluc$fungi_cpm))
+t.test(log(fungi_cpm) ~ Treatment, data=myoluc, paired=TRUE)
+
+early_myo_pos <- myomyo[myomyo$Treatment == "early_pos", ]
+early_luc_pos <- myoluc[myoluc$Treatment == "early_pos", ]
+
+mean(log(early_luc_neg$fungi_cpm))
+mean(log(early_luc_pos$fungi_cpm))
+mean(log(early_myo_neg$fungi_cpm))
+mean(log(early_myo_pos$fungi_cpm))
+
+
+#saving out the dataframes
+big_info <- rbind(myomyo, myoluc)
+big_info$fungi_cpK <- big_info$fungi_cpm/1000
+
+#write out the csv, and copy over manually the fungal counts into the big info dataframe
+write.csv(big_info, "early_info_w_fungi.csv")
+
+
+#comparing across time
+myo <- info[info$Species == "myomyo", ]
+luc <- info[info$Species == "myoluc", ]
+shapiro.test(myo$new_fungi_cmp)
+shapiro.test(luc$new_fungi_cmp)
+shapiro.test(log(myo$new_fungi_cmp))
+shapiro.test(log(luc$new_fungi_cmp))
+ggplot(luc, aes(log(new_fungi_cmp))) + geom_histogram()
+
+wilcox.test(log(new_fungi_cmp) ~ Timepoint, myo, paired=TRUE)
+wilcox.test(log(new_fungi_cmp) ~ Timepoint, luc, paired=TRUE)
+
+median(log(((myo[myo$Timepoint == "early",]))$new_fungi_cmp))
+median(log(((myo[myo$Timepoint == "late",]))$new_fungi_cmp))
+median(log(((luc[luc$Timepoint == "early",]))$new_fungi_cmp))
+median(log(((luc[luc$Timepoint == "late",]))$new_fungi_cmp))
+
+
+
+
+
+
+#4. running DESEQ to explore the data - 1st contrast as example
+#load packages and set working directory
+library("DESeq2")
+library(dplyr)
+library("apeglm")
+library(ashr)
+library("vsn")
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(EnhancedVolcano)
+setwd("~/Documents/coding_files/Chap4/raw_counts")
+
+#need to first read in the big data before we subset it
+#read in the gene info
+genes <- read.csv("gene_info.csv", header=TRUE)
+#read in the species info
+info = read.csv("sample_info.csv", header=TRUE) #have had to change names to have characters in front of them, because R and deseq both get upset with numbers
+#add in the big dataframe of counts 
+df = read.csv("star/star_total_counts.tsv", sep="\t", header=TRUE)
+
+#make the dataframe so it removes the extra info
+#make the geneid the rownames
+rownames(df) <- df[,1]
+#get rid of all of the non count columns
+counts <- df[,-c(1:6)]
+
+#getting only the bat counts
+bat_genes <- genes[genes$Species == "myomyo",] #get only the info on bat genes
+bat_id <- bat_genes[,1] #get only the ids as a list
+bat_counts <- counts[bat_id, ] #filter total counts using the id list
+
+#filter so we are only looking at myomyo
+myo_info <- info[info$Species == "myomyo", ]
+#also filter out the one individual that has a higher negative value than positive
+myo_info <- myo_info[myo_info$Individual != "mm_14",]
+
+
+
+#CONTRAST ONE: early negative vs early positive
+#filter to only include the early timepoints
+con1_info <- myo_info[myo_info$Timepoint == "early",]
+con1_id <- con1_info[,1]
+#filter the bat_count data to only include con1 columns
+con1_counts <- bat_counts[, con1_id]
+#move the row names (genes) to a column
+con1_counts <- tibble::rownames_to_column(con1_counts, "Geneid")
+
+#create a DESeq object
+con1_dds <- DESeqDataSetFromMatrix(countData=con1_counts, 
+                              colData=con1_info, 
+                              design=~Individual + Status, tidy = TRUE)
+
+#filter out low count genes, set the smallest group size, and keeps rows that have a count of at least 10 for 7 samples
+smallestGroupSize <- 7
+keep <- rowSums(counts(con1_dds) >= 10) >= smallestGroupSize
+con1_dds <- con1_dds[keep,]
+
+#set the reference level, the level that deseq compares against (deseq default is alphabetical)
+con1_dds$Status <- relevel(con1_dds$Status, ref = "negative")
+#run the deseq model (adds to the object), 
+con1_dds <- DESeq(con1_dds)
+
+#list the coefficients
+resultsNames(con1_dds)
+#get out the results for one of the coefficients (the one we care about)
+con1_res <- results(con1_dds, name="Status_positive_vs_negative")
+#can shrink the log-fold change for visualisation and ranking
+con1_resLFC <- lfcShrink(con1_dds, coef="Status_positive_vs_negative", type="apeglm")
+#order the results by smallest p value
+con1_res_ordered <- con1_res[order(con1_res$pvalue),]
+#summary of the results
+summary(con1_res)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.1, na.rm=TRUE) #519
+#can also look at results if the fdr cutoff is 0.05
+con1_res0.5 <- results(con1_dds, alpha=0.05)
+summary(con1_res0.5)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.05, na.rm=TRUE) #336
+
+#plot MA
+plotMA(con1_res, ylim=c(-3,3), xlim= c(1,1e5)) + title("standard")
+#plot the MA with shrunken log fold change for less noise
+plotMA(con1_resLFC, ylim=c(-3,3), xlim= c(1,1e5)) + title("shrunken log fold change")
+
+#can look at different shrinkage estimators
+con1_resNorm <- lfcShrink(con1_dds, coef=8, type="normal")
+con1_resAsh <- lfcShrink(con1_dds, coef=8, type="ashr")
+par(mfrow=c(1,3), mar=c(4,4,2,1))
+xlim <- c(1,1e5); ylim <- c(-3,3)
+plotMA(con1_resNorm, xlim=xlim, ylim=ylim, main="normal")
+plotMA(con1_resLFC, xlim=xlim, ylim=ylim, main="apeglm") 
+plotMA(con1_resAsh, xlim=xlim, ylim=ylim, main="ashr")
+
+#plot the gene with the smallest adjusted p against the two conditions
+par(mfrow=c(1,1))
+plotCounts(con1_dds, gene=which.min(con1_res$padj), intgroup="Status")
+
+#information about which variables and tests were used can be found by calling the function mcols on the results object
+mcols(con1_res)$description
+
+#transforming the variance
+#normal transformation (log(n+1))
+con1_ntd <- normTransform(con1_dds)
+#vst: variance stabilising transformations, blind to experimental groups
+con1_vsd <- vst(con1_dds, blind=TRUE)
+#rlog: regularised logarithm, blind to experimental groups
+con1_rld <- rlog(con1_dds, blind=TRUE)
+
+#plotting the different variances
+#normal transformation
+meanSdPlot(assay(con1_ntd)) 
+#vst 
+meanSdPlot(assay(con1_vsd))
+#rlog
+meanSdPlot(assay(con1_rld))
+
+#running a heat map for the different transofrmations for the top 20 
+select <- order(rowMeans(counts(con1_dds,normalized=TRUE)),
+                decreasing=TRUE)[1:20] #get the top 20
+df <- as.data.frame(colData(con1_dds)[,c("Status","Individual")]) #get the (info?) data for the first 20
+#run the heatmap for the normal transformation
+pheatmap(assay(con1_ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the vst
+pheatmap(assay(con1_vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the rlog
+pheatmap(assay(con1_rld)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+
+#run a heatmap of sample-sample distances
+sampleDists <- dist(t(assay(con1_vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(con1_vsd$Status, con1_vsd$Individual, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+#principal component analysis (basically a mds plot)
+#plot pca using ggplot
+pcaData <- plotPCA(con1_vsd, intgroup=c("Status", "Individual"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=Individual, shape=Status)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+
+#plot dispersion
+plotDispEsts(con1_dds)
+
+#plot the volcano plot!
+EnhancedVolcano(con1_res,
+                lab = rownames(con1_res),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Early positive vs early negative",
+                pCutoff = 0.05,
+                legendLabels = c("NS", expression(Log[2] ~ FC), "Adjusted p-value", expression(Adjusted~p - value ~ and ~ log[2] ~ FC)),
+                col = c("grey30", "#609b2a", "orchid4", "plum3"),
+                subtitle = NULL)
+
+#filter the csv to have the most relaxed threshold allowed, then save out
+con1_resFilt <- con1_res[which(con1_res$padj < 0.1 & abs(con1_res$log2FoldChange) > 1), ] #274
+write.csv(con1_resFilt, file="../DGE_csvs/myomyo_ENvEP_p01fc1.csv")
+#
+con1_resFilt <- con1_res[which(con1_res$padj < 0.05 & abs(con1_res$log2FoldChange) > 1), ] #225
+write.csv(con1_resFilt, file="../DGE_csvs/myomyo_ENvEP_p005fc1.csv")
+
+
+
+
+
+
+
+#5. Running DESEQ2 for the final contrasts used, and creating volcano plots
+#select variables as necessary
+#load packages and set working directory
+library("DESeq2")
+library(dplyr)
+library("apeglm")
+library(ashr)
+library("vsn")
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(EnhancedVolcano)
+setwd("~/Documents/coding_files/Chap4/raw_counts")
+
+spp = "myomyo"
+#spp = "myoluc"
+#time = "early"
+#time = "late"
+number = 7
+#number = 8
+#coef = "Status_positive_vs_negative"
+coef = "Timepoint_late_vs_early"
+#ref = "negative"
+ref = "early"
+
+
+
+#MYOTIS MYOTIS: all four contrasts
+#need to first read in the big data before we subset it
+#read in the gene info
+genes <- read.csv("gene_info.csv", header=TRUE)
+#read in the species info
+info = read.csv("sample_info.csv", header=TRUE) #have had to change names to have characters in front of them, because R and deseq both get upset with numbers
+#add in the big dataframe of counts 
+df = read.csv("star/star_total_counts.tsv", sep="\t", header=TRUE)
+
+#make the dataframe so it removes the extra info
+#make the geneid the rownames
+rownames(df) <- df[,1]
+#get rid of all of the non count columns
+counts <- df[,-c(1:6)]
+
+#MYOMYO
+#getting only the bat counts
+bat_genes <- genes[genes$Species == "myomyo",] #get only the info on bat genes
+bat_id <- bat_genes[,1] #get only the ids as a list
+bat_counts <- counts[bat_id, ] #filter total counts using the id list
+
+#filter so we are only looking at myomyo
+spp_info <- info[info$Species == spp, ]
+#also filter out the one individual that has a higher negative value than positive
+spp_info <- spp_info[spp_info$Individual != "mm_14",]
+
+#filter to only include the early timepoints
+#con1_info <- spp_info[spp_info$Timepoint == time,]
+con1_info <- spp_info
+
+con1_id <- con1_info[,1]
+#filter the bat_count data to only include con1 columns
+con1_counts <- bat_counts[, con1_id]
+#move the row names (genes) to a column
+con1_counts <- tibble::rownames_to_column(con1_counts, "Geneid")
+
+#create a DESeq object
+#con1_dds <- DESeqDataSetFromMatrix(countData=con1_counts, 
+#                                   colData=con1_info, 
+#                                   design=~Individual + Status, tidy = TRUE)
+con1_dds <- DESeqDataSetFromMatrix(countData=con1_counts, 
+                                   colData=con1_info, 
+                                   design=~Individual + Timepoint, tidy = TRUE)
+#filter out low count genes, set the smallest group size, and keeps rows that have a count of at least 10 for 7 samples
+smallestGroupSize <- number
+keep <- rowSums(counts(con1_dds) >= 10) >= smallestGroupSize
+con1_dds <- con1_dds[keep,]
+
+#set the reference level, the level that deseq compares against (deseq default is alphabetical)
+#con1_dds$Status <- relevel(con1_dds$Status, ref = ref)
+con1_dds$Timepoint <- relevel(con1_dds$Timepoint, ref = ref)
+#run the deseq model (adds to the object), 
+con1_dds <- DESeq(con1_dds)
+
+#get out the results for one of the coefficients (the one we care about)
+con1_res <- results(con1_dds, name=coef)
+
+#plot the volcano plot!
+EnhancedVolcano(con1_res,
+                lab = rownames(con1_res),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = bquote(italic("    Myotis myotis")),
+                #title = bquote(italic("    Myotis lucifugus")),
+                #pCutoff = 0.05,
+                pCutoff = 0.01,
+                #FCcutoff = 1,
+                FCcutoff = 4,
+                legendLabels = c("NS", expression(Log[2] ~ FC), "Adjusted p-value", expression(Adjusted~p - value ~ and ~ log[2] ~ FC)),
+                col = c("grey30", "#609b2a", "orchid4", "plum3"),
+                subtitle = NULL,
+                #xlim = c(-17, 12), 
+                #xlim = c(-7,12),
+                xlim = c(-13, 18),
+                #ylim = c(-1, 25),
+                #ylim = c(0,13),
+                ylim = c(-1, 305),
+                legendPosition = "bottom",
+                gridlines.major = F,
+                gridlines.minor = F,
+                legendLabSize = 18,
+                labSize = 5,
+                titleLabSize = 23)
+#w:1200, h: 750
+
+
+
+
+
+
+
+
+#6. Early continuous models
+#fungi as a continuous variable
+#load packages and set working directory
+library("DESeq2")
+library(dplyr)
+library("apeglm")
+library(ashr)
+library("vsn")
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(EnhancedVolcano)
+
+setwd("~/Documents/coding_files/Chap4/raw_counts")
+#read in the species info
+info = read.csv("sample_info.csv", header=TRUE) 
+
+#looking at the distribution of fungal counts
+ggplot(info, aes(x=fungi_cpm)) + geom_histogram()
+ggplot(info, aes(x=fungi_cpK)) + geom_histogram()
+#log the fungal counts to see if this makes a more normal distribution
+info$fungi_log <- log(info$fungi_cpm)
+ggplot(info, aes(x=fungi_log)) + geom_histogram()
+info$fungi_Klog <- log(info$fungi_cpK)
+ggplot(info, aes(x=fungi_Klog)) + geom_histogram()
+#the logged data is more normal - although not actually normal, than the non-logged
+shapiro.test(info$fungi_cpm)
+shapiro.test(info$fungi_cpK)
+shapiro.test(info$fungi_log)
+shapiro.test(info$fungi_Klog) #this has about the same range as the normal logged, but goes negative, so is probably worse than the other one
+
+
+#read in the gene info
+genes <- read.csv("gene_info.csv", header=TRUE)
+#add in the big dataframe of counts 
+df = read.csv("star/star_total_counts.tsv", sep="\t", header=TRUE)
+
+#make the dataframe so it removes the extra info
+#make the geneid the rownames
+rownames(df) <- df[,1]
+#get rid of all of the non count columns
+counts <- df[,-c(1:6)]
+
+#getting only the bat counts
+bat_genes <- genes[genes$Species == "myomyo",] #get only the info on bat genes
+bat_id <- bat_genes[,1] #get only the ids as a list
+bat_counts <- counts[bat_id, ] #filter total counts using the id list
+
+#filter so we are only looking at myomyo
+myo_info <- info[info$Species == "myomyo", ]
+#also filter out the one individual that has a higher negative value than positive
+#STILL REMOVING THIS INDIVIDUAL, SO I CAN COMPARE TO THE PREVIOUS DATA
+myo_info <- myo_info[myo_info$Individual != "mm_14",]
+
+
+
+
+#CONTRAST ONE: early negative vs early positive
+#filter to only include the early timepoints
+con1_info <- myo_info[myo_info$Timepoint == "early",]
+con1_id <- con1_info[,1]
+#filter the bat_count data to only include con1 columns
+con1_counts <- bat_counts[, con1_id]
+#move the row names (genes) to a column
+con1_counts <- tibble::rownames_to_column(con1_counts, "Geneid")
+
+#looking at the distribution of fungal counts
+ggplot(con1_info, aes(x=fungi_cpm)) + geom_histogram()
+ggplot(con1_info, aes(x=fungi_cpK)) + geom_histogram()
+#log the fungal counts to see if this makes a more normal distribution
+con1_info$fungi_log <- log(con1_info$fungi_cpm)
+ggplot(con1_info, aes(x=fungi_log)) + geom_histogram()
+con1_info$fungi_Klog <- log(con1_info$fungi_cpK)
+ggplot(con1_info, aes(x=fungi_Klog)) + geom_histogram()
+#the logged data is more normal - although not actually normal, than the non-logged
+shapiro.test(con1_info$fungi_cpm)
+shapiro.test(con1_info$fungi_cpK)
+shapiro.test(con1_info$fungi_log) #DATA IS NORMAL
+shapiro.test(con1_info$fungi_Klog)
+
+#scale the fungal variable for deseq to be happy
+con1_info$fungi_log_scaled = scale(con1_info$fungi_log, center=TRUE)
+ggplot(con1_info, aes(x=fungi_log_scaled)) + geom_histogram()
+
+#create a DESeq object
+con1_dds <- DESeqDataSetFromMatrix(countData=con1_counts, 
+                                   colData=con1_info, 
+                                   design=~Individual + fungi_log_scaled, tidy = TRUE)
+#the design formula contains one or more numeric variables that have mean or
+#standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+#Including numeric variables with large mean can induce collinearity with the intercept.
+#Users should center and scale numeric variables in the design to improve GLM convergence.
+
+#filter out low count genes, set the smallest group size, and keeps rows that have a count of at least 10 for 7 samples
+smallestGroupSize <- 7
+keep <- rowSums(counts(con1_dds) >= 10) >= smallestGroupSize
+con1_dds <- con1_dds[keep,]
+
+#set the reference level, the level that deseq compares against (deseq default is alphabetical)
+#NOT SETTING THE REFERENCE LEVEL, AS IS CONTINUOUS
+#run the deseq model (adds to the object), 
+con1_dds <- DESeq(con1_dds)
+#no error with scaled and centred factors
+
+#list the coefficients
+resultsNames(con1_dds)
+#get out the results for one of the coefficients (the one we care about)
+con1_res <- results(con1_dds, name="fungi_log_scaled")
+#can shrink the log-fold change for visualisation and ranking
+con1_resLFC <- lfcShrink(con1_dds, coef="fungi_log_scaled", type="apeglm")
+#order the results by smallest p value
+con1_res_ordered <- con1_res[order(con1_res$pvalue),]
+#summary of the results
+summary(con1_res)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.1, na.rm=TRUE) #189
+#can also look at results if the fdr cutoff is 0.05
+con1_res0.5 <- results(con1_dds, alpha=0.05)
+summary(con1_res0.5)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.05, na.rm=TRUE) #133
+
+
+#transforming the variance
+#normal transformation (log(n+1))
+con1_ntd <- normTransform(con1_dds)
+#vst: variance stabilising transformations, blind to experimental groups
+con1_vsd <- vst(con1_dds, blind=TRUE)
+#rlog: regularised logarithm, blind to experimental groups
+con1_rld <- rlog(con1_dds, blind=TRUE)
+
+#plotting the different variances
+#normal transformation
+meanSdPlot(assay(con1_ntd)) 
+#vst 
+meanSdPlot(assay(con1_vsd))
+#rlog
+meanSdPlot(assay(con1_rld))
+
+#running a heat map for the different transofrmations for the top 20 
+select <- order(rowMeans(counts(con1_dds,normalized=TRUE)),
+                decreasing=TRUE)[1:20] #get the top 20
+df <- as.data.frame(colData(con1_dds)[,c("fungi_log_scaled","Individual")]) #get the (info?) data for the first 20
+#run the heatmap for the normal transformation
+pheatmap(assay(con1_ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the vst
+pheatmap(assay(con1_vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the rlog
+pheatmap(assay(con1_rld)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+
+#run a heatmap of sample-sample distances
+sampleDists <- dist(t(assay(con1_vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(con1_vsd$Status, con1_vsd$Individual, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+
+#plot the volcano plot!
+EnhancedVolcano(con1_res,
+                lab = rownames(con1_res),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Early positive vs early negative",
+                pCutoff = 0.05,
+                legendLabels = c("NS", expression(Log[2] ~ FC), "Adjusted p-value", expression(Adjusted~p - value ~ and ~ log[2] ~ FC)),
+                col = c("grey30", "#609b2a", "orchid4", "plum3"),
+                subtitle = NULL)
+
+#filter the csv to have the most relaxed threshold allowed, then save out
+con1_resFilt <- con1_res[which(con1_res$padj < 0.1 & abs(con1_res$log2FoldChange) > 1), ]
+write.csv(con1_resFilt, file="../DGE_csvs/myomyo_early_continuous.csv")
+
+
+#####MYOLUC
+setwd("~/Documents/coding_files/Chap4/raw_counts")
+#read in the species info
+info = read.csv("sample_info.csv", header=TRUE) 
+
+#looking at the distribution of fungal counts
+ggplot(info, aes(x=fungi_cpm)) + geom_histogram()
+ggplot(info, aes(x=fungi_cpK)) + geom_histogram()
+#log the fungal counts to see if this makes a more normal distribution
+info$fungi_log <- log(info$fungi_cpm)
+ggplot(info, aes(x=fungi_log)) + geom_histogram()
+info$fungi_Klog <- log(info$fungi_cpK)
+ggplot(info, aes(x=fungi_Klog)) + geom_histogram()
+#the logged data is more normal - although not actually normal, than the non-logged
+shapiro.test(info$fungi_cpm)
+shapiro.test(info$fungi_cpK)
+shapiro.test(info$fungi_log)
+shapiro.test(info$fungi_Klog) #this has about the same range as the normal logged, but goes negative, so is probably worse than the other one
+
+
+#read in the gene info
+genes <- read.csv("gene_info.csv", header=TRUE)
+#add in the big dataframe of counts 
+df = read.csv("star/star_total_counts.tsv", sep="\t", header=TRUE)
+
+#make the dataframe so it removes the extra info
+#make the geneid the rownames
+rownames(df) <- df[,1]
+#get rid of all of the non count columns
+counts <- df[,-c(1:6)]
+
+#getting only the bat counts
+bat_genes <- genes[genes$Species == "myomyo",] #get only the info on bat genes
+bat_id <- bat_genes[,1] #get only the ids as a list
+bat_counts <- counts[bat_id, ] #filter total counts using the id list
+
+#filter so we are only looking at myoluc
+luc_info <- info[info$Species == "myoluc", ]
+
+
+
+
+
+#CONTRAST ONE: early negative vs early positive
+#filter to only include the early timepoints
+con1_info <- luc_info[luc_info$Timepoint == "early",]
+con1_id <- con1_info[,1]
+#filter the bat_count data to only include con1 columns
+con1_counts <- bat_counts[, con1_id]
+#move the row names (genes) to a column
+con1_counts <- tibble::rownames_to_column(con1_counts, "Geneid")
+
+#looking at the distribution of fungal counts
+ggplot(con1_info, aes(x=fungi_cpm)) + geom_histogram()
+ggplot(con1_info, aes(x=fungi_cpK)) + geom_histogram()
+#log the fungal counts to see if this makes a more normal distribution
+con1_info$fungi_log <- log(con1_info$fungi_cpm)
+ggplot(con1_info, aes(x=fungi_log)) + geom_histogram()
+con1_info$fungi_Klog <- log(con1_info$fungi_cpK)
+ggplot(con1_info, aes(x=fungi_Klog)) + geom_histogram()
+#the logged data is more normal - although not actually normal, than the non-logged
+shapiro.test(con1_info$fungi_cpm)
+shapiro.test(con1_info$fungi_cpK)
+shapiro.test(con1_info$fungi_log) #DATA IS NORMAL
+shapiro.test(con1_info$fungi_Klog)
+
+#scale the fungal variable for deseq to be happy
+con1_info$fungi_log_scaled = scale(con1_info$fungi_log, center=TRUE)
+ggplot(con1_info, aes(x=fungi_log_scaled)) + geom_histogram()
+
+#create a DESeq object
+con1_dds <- DESeqDataSetFromMatrix(countData=con1_counts, 
+                                   colData=con1_info, 
+                                   design=~Individual + fungi_log_scaled, tidy = TRUE)
+#the design formula contains one or more numeric variables that have mean or
+#standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+#Including numeric variables with large mean can induce collinearity with the intercept.
+#Users should center and scale numeric variables in the design to improve GLM convergence.
+
+#filter out low count genes, set the smallest group size, and keeps rows that have a count of at least 10 for 7 samples
+smallestGroupSize <- 8
+keep <- rowSums(counts(con1_dds) >= 10) >= smallestGroupSize
+con1_dds <- con1_dds[keep,]
+
+#set the reference level, the level that deseq compares against (deseq default is alphabetical)
+#NOT SETTING THE REFERENCE LEVEL, AS IS CONTINUOUS
+#run the deseq model (adds to the object), 
+con1_dds <- DESeq(con1_dds)
+#no error with scaled and centred factors
+
+#list the coefficients
+resultsNames(con1_dds)
+#get out the results for one of the coefficients (the one we care about)
+con1_res <- results(con1_dds, name="fungi_log_scaled")
+#can shrink the log-fold change for visualisation and ranking
+con1_resLFC <- lfcShrink(con1_dds, coef="fungi_log_scaled", type="apeglm")
+#order the results by smallest p value
+con1_res_ordered <- con1_res[order(con1_res$pvalue),]
+#summary of the results
+summary(con1_res)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.1, na.rm=TRUE) #189
+#can also look at results if the fdr cutoff is 0.05
+con1_res0.5 <- results(con1_dds, alpha=0.05)
+summary(con1_res0.5)
+#count how many adjusted p values were less than 0.1
+sum(con1_res$padj < 0.05, na.rm=TRUE) #133
+
+
+#transforming the variance
+#normal transformation (log(n+1))
+con1_ntd <- normTransform(con1_dds)
+#vst: variance stabilising transformations, blind to experimental groups
+con1_vsd <- vst(con1_dds, blind=TRUE)
+#rlog: regularised logarithm, blind to experimental groups
+con1_rld <- rlog(con1_dds, blind=TRUE)
+
+#plotting the different variances
+#normal transformation
+meanSdPlot(assay(con1_ntd)) 
+#vst 
+meanSdPlot(assay(con1_vsd))
+#rlog
+meanSdPlot(assay(con1_rld))
+
+#running a heat map for the different transofrmations for the top 20 
+select <- order(rowMeans(counts(con1_dds,normalized=TRUE)),
+                decreasing=TRUE)[1:20] #get the top 20
+df <- as.data.frame(colData(con1_dds)[,c("fungi_log_scaled","Individual")]) #get the (info?) data for the first 20
+#run the heatmap for the normal transformation
+pheatmap(assay(con1_ntd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the vst
+pheatmap(assay(con1_vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+#run the heatmap for the rlog
+pheatmap(assay(con1_rld)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+
+#run a heatmap of sample-sample distances
+sampleDists <- dist(t(assay(con1_vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(con1_vsd$Status, con1_vsd$Individual, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+
+
+#plot the volcano plot!
+EnhancedVolcano(con1_res,
+                lab = rownames(con1_res),
+                x = 'log2FoldChange',
+                y = 'padj',
+                title = "Early positive vs early negative",
+                pCutoff = 0.05,
+                legendLabels = c("NS", expression(Log[2] ~ FC), "Adjusted p-value", expression(Adjusted~p - value ~ and ~ log[2] ~ FC)),
+                col = c("grey30", "#609b2a", "orchid4", "plum3"),
+                subtitle = NULL)
+
+#filter the csv to have the most relaxed threshold allowed, then save out
+con1_resFilt <- con1_res[which(con1_res$padj < 0.1 & abs(con1_res$log2FoldChange) > 1), ]
+write.csv(con1_resFilt, file="../DGE_csvs/myoluc_early_continuous.csv")
+
+
+
+
+
+
+#7. venn diagrams
+#creating a big venn diagram for all the base contrasts
+
+#set libraries and working directory
+library(dplyr)
+library(VennDiagram)
+setwd("~/Documents/coding_files/Chap4/DGE_csvs")
+
+#read in the lists
+#myomyo locals
+mm_ENvEP = read.csv("myomyo_ENvEP_p005fc1.csv", header=TRUE)
+mm_LNvLP = read.csv("myomyo_LNvLP_p005fc1.csv", header=TRUE)
+#myoluc locals
+ml_ENvEP = read.csv("myoluc_ENvEP_p005fc1.csv", header=TRUE)
+ml_LNvLP = read.csv("myoluc_LNvLP_p005fc1.csv", header=TRUE)
+
+#broad timepoints
+ml_EvL = read.csv("myoluc_EvL_p001fc4.csv", header=TRUE)
+mm_EvL = read.csv("myomyo_EvL_p001fc4.csv", header=TRUE)
+
+#get upreg and downreg significants
+#myomyo locals
+mm_ENvEP_up = mm_ENvEP[mm_ENvEP$log2FoldChange > 0,]
+mm_ENvEP_down = mm_ENvEP[mm_ENvEP$log2FoldChange < 0,]
+mm_LNvLP_up = mm_LNvLP[mm_LNvLP$log2FoldChange > 0,]
+mm_LNvLP_down = mm_LNvLP[mm_LNvLP$log2FoldChange < 0,]
+#myoluc locals
+ml_ENvEP_up = ml_ENvEP[ml_ENvEP$log2FoldChange > 0,]
+ml_ENvEP_down = ml_ENvEP[ml_ENvEP$log2FoldChange < 0,]
+ml_LNvLP_up = ml_LNvLP[ml_LNvLP$log2FoldChange > 0,]
+ml_LNvLP_down = ml_LNvLP[ml_LNvLP$log2FoldChange < 0,]
+#broad timepoints
+ml_EvL_up = ml_EvL[ml_EvL$log2FoldChange > 0,]
+ml_EvL_down = ml_EvL[ml_EvL$log2FoldChange < 0,]
+mm_EvL_up = mm_EvL[mm_EvL$log2FoldChange > 0,]
+mm_EvL_down = mm_EvL[mm_EvL$log2FoldChange < 0,]
+
+#early locals
+compare_E_locals <- list(
+  mmENvEP_up = array(mm_ENvEP_up$X), #1
+  mlENvEP_down = array(ml_ENvEP_down$X), #4
+  mmENvEP_down = array(mm_ENvEP_down$X), #2
+  mlENvEP_up = array(ml_ENvEP_up$X) #3
+)
+
+#late locals
+compare_L_locals <- list(
+  mmLNvLP_up = array(mm_LNvLP_up$X), #1
+  mlLNvLP_down = array(ml_LNvLP_down$X), #4
+  mmLNvLP_down = array(mm_LNvLP_down$X), #2
+  mlLNvLP_up = array(ml_LNvLP_up$X) #3
+)
+
+#broad timepoints
+compare_timepoints <- list(
+  mmEvL_up = array(mm_EvL_up$X), #1
+  mlEvL_down = array(ml_EvL_down$X), #4
+  mmEvL_down = array(mm_EvL_down$X), #2
+  mlEvL_up = array(ml_EvL_up$X) #3
+)
+
+
+
+####display the venns in real-time so i can customise them
+# Helper function to display Venn diagram
+display_venn <- function(x, ...){
+  library(VennDiagram)
+  grid.newpage()
+  venn_object <- venn.diagram(x, filename = NULL, ...)
+  grid.draw(venn_object)
+}
+#1,4,2,3
+
+display_venn(compare_E_locals,
+             fill = c("#c892a7", "#012055", "#889ec7", "#792149"), 
+             cex = 2.5,
+             category.names=c(
+               expression( italic("M. myo ")*up ), 
+               expression( italic("M. luc ")*down ),
+               expression( italic("M. myo ")*down ), 
+               expression( italic("M. luc ")*up)
+               ),
+             cat.cex=1.7)
+#w:850, h:750
+
+display_venn(compare_L_locals,
+             fill = c("#c892a7", "#012055", "#889ec7", "#792149"), 
+             cex = 2.5,
+             category.names=c(
+               expression( italic("M. myo ")*up ), 
+               expression( italic("M. luc ")*down ),
+               expression( italic("M. myo ")*down ), 
+               expression( italic("M. luc ")*up) 
+             ),
+             cat.cex=1.7)
+
+
+
+display_venn(compare_timepoints,
+             fill = c("#c892a7", "#012055", "#889ec7", "#792149"), 
+             cex = 2.5,
+             category.names=c(
+               expression( italic("M. myo ")*up ), 
+               expression( italic("M. luc ")*down ),
+               expression( italic("M. myo ")*down ), 
+               expression( italic("M. luc ")*up) 
+             ),
+             cat.cex=1.7)
+
+
+
+
+
+
+
+display_venn(compare_myomyo,
+             fill = c("#999999", "#E69F00", "#56B4E9", "#009E73"))
+
+display_venn(compare_myomyo,
+             fill = c("thistle", "darkorchid4", "plum3", "orchid4"))
+display_venn(compare_myoluc,
+             fill = c("beige", "darkolivegreen4", "darkolivegreen1", "olivedrab3"))
+display_venn(compare_local,
+             fill = c("thistle", "darkolivegreen1", "plum3", "beige"))
+display_venn(compare_timepoints,
+             fill = c("orchid4", "darkolivegreen4", "darkorchid4", "olivedrab3"))
+
+
+c("thistle", "plum3", "orchid4", "darkorchid4") #1,2,3,4
+c("thistle", "darkorchid4", "plum3", "orchid4") #1,4,2,3
+
+c("beige", "darkolivegreen1", "olivedrab3" "darkolivegreen4")
+c("beige", "darkolivegreen4", "darkolivegreen1", "olivedrab3")
+
+c("thistle", "darkolivegreen1", "plum3", "beige")
+c("orchid4", "darkolivegreen4", "darkorchid4", "olivedrab3")
+
+
+c("#8fb830", "#638e19", "#b29c0c", "#b56c19")
+c("#a6416f", "#792149", "#1e5ea6", "#103b7c")
+
+display_venn(compare_myomyo,
+             fill = c("#8fb830", "#b56c19", "#638e19", "#b29c0c"))
+display_venn(compare_E_locals,
+             fill = c("#a6416f", "#103b7c", "#792149", "#1e5ea6"))
+display_venn(compare_local,
+             fill = c("#8fb830", "#792149", "#638e19", "#a6416f"))
+display_venn(compare_time,
+             fill = c("#b29c0c", "#103b7c", "#b56c19", "#1e5ea6"))
+
+
+display_venn(compare_L_locals,
+             fill = c("#a3ba8c", "#b56c19", "#638e19", "#b29c0c"))
+display_venn(compare_E_locals,
+             fill = c("#c892a7", "#012055", "#792149", "#889ec7"))
+display_venn(compare_local,
+             fill = c("#a3ba8c", "#792149", "#638e19", "#c892a7"))
+display_venn(compare_timepoints,
+             fill = c("#b29c0c", "#012055", "#b56c19", "#889ec7"))
+
+
+
+
+
+
+
+
+#8. heatmaps 
+#delete as necessary
+#remaking the heatmaps using log2foldchange
+####8. Starting to run DESeq2
+#load packages and set working directory
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(stringr)
+library(reshape)
+library(rmutil)
+library(cowplot)
+library(gridExtra)
+setwd("~/Documents/coding_files/Chap4/DGE_csvs/")
+
+#read in the dge csvs
+#early local
+#mm = read.csv("myomyo_ENvEP_p005fc1.csv")
+#ml = read.csv("myoluc_ENvEP_p005fc1.csv")
+#late local
+#mm = read.csv("myomyo_LNvLP_p005fc1.csv")
+#ml = read.csv("myoluc_LNvLP_p005fc1.csv")
+#systemic overtime
+mm = read.csv("myomyo_EvL_p001fc4.csv")
+ml = read.csv("myoluc_EvL_p001fc4.csv")
+
+mm <- mm %>% dplyr::rename(genes = X)
+ml <- ml %>% dplyr::rename(genes = X)
+
+
+#NEW GENE LISTS, THAT ARE GENES IN COMMON BETWEEN ALL OF THE DGES
+inflamm4 = c("THBS1", "FOS", "CD44", "FOSL1", "LCN2", "CCL5", "ECM1", "S100A8", "FFAR2", "THEMIS2", "CLEC7A", "C3AR1",   
+             "C5AR1", "MEFV", "IL1A", "IL1B", "SPINK7", "SERPINA1", "TNFAIP3", "HCK")
+leu_act4 = c("CD44", "IL20RB", "LY6D", "CCL5", "S100A12", "BCL3", "ITGB2", "PTPRC", "CLEC7A", "CLEC4D", "CLEC4E", 
+             "C5AR1", "EGR1", "ICAM1", "TNFAIP3", "ADGRF5") #have removed socs3, as it is not in 2nd round of leuact2 - rerun and check row orders before binding
+leu_mig4 = c("EXT1", "CCL5", "SPNS2", "SELL", "SELE", "S100A8", "FFAR2", "CSF3R", "ITGB2", "C5AR1", "IL1B", "TREM1", "HCK")
+
+#genes_list = inflamm4
+#genes_list = leu_act4
+genes_list = leu_mig4
+
+
+#create dataframe from list
+df_base <- as.data.frame(genes_list)
+df_base <- df_base %>% dplyr::rename(genes = genes_list)
+
+#filter the species dataframes 
+mm_filtered <- mm %>% filter(genes %in% genes_list)
+ml_filtered <- ml %>% filter(genes %in% genes_list)
+
+mm_filtered <- select(mm_filtered, genes, log2FoldChange)
+ml_filtered <- select(ml_filtered, genes, log2FoldChange)
+
+mm_filtered <- mm_filtered %>% dplyr::rename(myomyo = log2FoldChange)
+ml_filtered <- ml_filtered %>% dplyr::rename(myoluc = log2FoldChange)
+
+bigdf <- merge(x=df_base,y=mm_filtered, 
+             by="genes", all=TRUE)
+
+bigdf2 <- merge(x=bigdf,y=ml_filtered, 
+               by="genes", all=TRUE)
+bigdf_melt <- melt(bigdf2)
+
+bigdf_melt$groups <- cut(bigdf_melt$value,               # Add group column
+                       breaks = c(-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+
+#inflam_melt <- bigdf_melt
+#leuact_melt <- bigdf_melt
+leumig_melt <- bigdf_melt
+
+
+
+
+
+
+#plot without legend - p1 inflam, p2, leuact, p5 leumig
+p5 <- ggplot(leumig_melt, aes(x=variable, y = genes, fill = groups)) +
+  geom_tile() +
+  theme(axis.text.x = element_text(size=10, face="italic"), panel.background = element_blank(),
+        axis.ticks = element_blank(), legend.text = element_text(size=10),
+        axis.text.y = element_text(hjust=1), axis.line = element_line(colour = "black")) +
+  xlab(NULL) +
+#  ylab("Inflammation") +
+#  ylab("                                       Leukocyte activation") +
+  ylab("                                                          Leukocyte migration") +
+  scale_fill_manual(breaks = levels(bigdf_melt$groups),
+                    values = c("#010951", "#213178", "#30458b", "#6085c5", "#739bd8", "#9bc9fd",
+                               "white", "#fcd854", "#ffb345",  "#f87c1e", "#f65d0b", "#e44209",
+                               "#cf2b09", "#ba1909", "#a60909", "#640202", "#4a0206", "#300303"),
+                    na.value="lightgrey",
+                    drop=FALSE,
+                    guide = NULL,
+                    labels = c("-6", "-5", "-4", "-3","-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"),
+                    name="Log2FoldChange") +
+  scale_x_discrete(labels=c('M. myotis', 'M. lucifugus')) 
+
+#make plot to get legend = leumig
+p3 <- ggplot(leumig_melt, aes(x=variable, y = genes, fill = groups)) +
+  geom_tile() +
+  theme(axis.text.x = element_text(size=10, face="italic"), panel.background = element_blank(),
+        axis.ticks = element_blank(), legend.text = element_text(size=10),
+        axis.text.y = element_text(hjust=1), axis.line = element_line(colour = "black")) +
+  xlab(NULL) +
+  ylab("Leukocyte migration") +
+  scale_fill_manual(breaks = levels(bigdf_melt$groups),
+                    values = c("#010951", "#213178", "#30458b", "#6085c5", "#739bd8", "#9bc9fd",
+                               "white", "#fcd854", "#ffb345",  "#f87c1e", "#f65d0b", "#e44209",
+                               "#cf2b09", "#ba1909", "#a60909", "#640202", "#4a0206", "#300303"),
+                    na.value="lightgrey",
+                    drop=FALSE,
+                    guide = guide_legend(reverse=TRUE),
+                    labels = c("-6", "-5", "-4", "-3","-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"),
+                    name="Log2FoldChange") +
+  scale_x_discrete(labels=c('M. myotis', 'M. lucifugus')) 
+
+p4 <- get_legend(p3)
+
+
+grid.arrange(p1, p2, p5, p4,  layout_matrix=rbind
+             (c(1,1, NA,NA, NA,NA, NA),
+               c(1,1, NA,NA, NA,NA, NA),
+               c(1,1, NA,NA, NA,NA, 4),
+               c(1,1, NA,NA, NA,NA, 4),
+               c(1,1, 2,2, NA,NA, 4),
+               c(1,1, 2,2, NA,NA, 4),
+               c(1,1, 2,2, NA,NA, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, 4),
+               c(1,1, 2,2, 3,3, NA),
+               c(1,1, 2,2, 3,3, NA)
+               ))
+
+#w875, h600
+
+
+"#fa9932","#ffc369""#3f5a9f",
+
+
+
+
+
+
+
+#9. GO term enrichment
+#anrichment calculated by ShinyGO
+#heatmaps of the go enrichment
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+library(ggplot2)
+library(stringr)
+library(reshape)
+setwd("~/Documents/coding_files/Chap4/shinyGO_enrichment/KEGG/")
+#
+mmE <- read.csv("mm_ENvEP_p005fc1_enrichment_all.csv", header=TRUE)
+mmL <- read.csv("mm_LNvLP_p005fc1_enrichment_all.csv", header=TRUE)
+mmB <- read.csv("mm_EvL_p001fc4_enrichment_all.csv", header=TRUE)
+mlE <- read.csv("ml_ENvEP_p005fc1_enrichment_all.csv", header=TRUE)
+mlL <- read.csv("ml_LNvLP_p005fc1_enrichment_all.csv", header=TRUE)
+mlB <- read.csv("ml_EvL_p001fc4_enrichment_all.csv", header=TRUE)
+
+#filter to only have significant rows
+mmE_sig <- mmE[mmE$Enrichment.FDR < 0.05,]
+mmB_sig <- mmB[mmB$Enrichment.FDR < 0.05,]
+mlE_sig <- mlE[mlE$Enrichment.FDR < 0.05,]
+mlL_sig <- mlL[mlL$Enrichment.FDR < 0.05,]
+mlB_sig <- mlB[mlB$Enrichment.FDR < 0.05,]
+#leaving out mmL 
+
+#select out the genes and the fold enrichment
+mmE_fin <- mmE_sig %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+mmL_fin <- mmL %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+mmB_fin <- mmB_sig %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+mlE_fin <- mlE_sig %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+mlL_fin <- mlL_sig %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+mlB_fin <- mlB_sig %>% dplyr::select(Pathway, Fold.Enrichment, nGenes)
+
+#rename columns
+mmE_fin <- mmE_fin %>% dplyr::rename(mmE_FoldEnrichment=Fold.Enrichment,
+                                     mmE_nGenes=nGenes)
+mmL_fin <- mmL_fin %>% dplyr::rename(mmL_FoldEnrichment=Fold.Enrichment,
+                                     mmL_nGenes=nGenes)
+mmB_fin <- mmB_fin %>% dplyr::rename(mmB_FoldEnrichment=Fold.Enrichment,
+                                     mmB_nGenes=nGenes)
+mlE_fin <- mlE_fin %>% dplyr::rename(mlE_FoldEnrichment=Fold.Enrichment,
+                                     mlE_nGenes=nGenes)
+mlL_fin <- mlL_fin %>% dplyr::rename(mlL_FoldEnrichment=Fold.Enrichment,
+                                     mlL_nGenes=nGenes)
+mlB_fin <- mlB_fin %>% dplyr::rename(mlB_FoldEnrichment=Fold.Enrichment,
+                                     mlB_nGenes=nGenes)
+
+
+df_big <- merge(mmE_fin, mmL_fin, by="Pathway", all=TRUE)
+df_bigM <- merge(df_big, mmB_fin, by="Pathway", all=TRUE)
+df_big3 <- merge(mlE_fin, mlL_fin, by="Pathway", all=TRUE)
+df_bigL <- merge(df_big3, mlB_fin, by="Pathway", all=TRUE)
+df_big_all <- merge(df_bigM, df_bigL, by="Pathway", all=TRUE)
+
+
+write.csv(df_big_all, "GO_term_sig_KEGG.csv")
+
+
+
+
+
